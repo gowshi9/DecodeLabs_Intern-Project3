@@ -1,74 +1,109 @@
-# DecodeLabs Project 2: Backend API Development
+# DecodeLabs Project 3 - Database Integration
 
-## Project Overview
-
-This repository houses the backend services for the **Skill-Based Internship Matching System**. Acting as the **core data engine and nervous system** of the application, this service handles user identity, registers roles (e.g., interns, admins), validates requests syntactically and semantically, and serves as the source of truth for downstream matching algorithms.
+A robust Node.js and Express.js backend seamlessly integrated with MongoDB using Mongoose, establishing a digital vault focused on state persistence and data longevity.
 
 ---
 
-## Key Features
+## 🏛️ The 4 Pillars of Database Integration
 
-### 1. In-Memory Data Store
-- Employs a lightweight, fast, and thread-safe in-memory `users` array to store registered participants during runtime.
+The system architecture and data storage layer are structured around four fundamental technical pillars:
 
-### 2. GET `/users` Endpoint
-- Retrieves the complete list of registered users.
-- Returns a structured list of users with a flat schema.
+### 1. Pillar 1: The Blueprint (Mongoose Schema Design)
+Establishes strict database-level schemas with explicit validation constraints to preserve structural data integrity before persistence.
+* **Fields & Types**: Defines fields (`name`, `email`, `age`) with explicit Node.js type bindings.
+* **Required Properties**: Enforces input presence via schema-level required rules with clean custom messaging.
+* **Regex Validations**: Employs a strict email regex format check (`/^[^\s@]+@[^\s@]+\.[^\s@]+$/`) to reject invalid email structures.
+* **Value Boundaries**: Validates numeric boundaries using mongoose minimum value validations (e.g., age must be at least `18`).
+* **Metadata Auditing**: Automatically tracks record creation and modification times through Mongoose `{ timestamps: true }`.
 
-### 3. POST `/users` Endpoint
-- Registers a new user in the system.
-- Enforces strict validation layers before memory persistence.
+### 2. Pillar 2: The Bridge (Secure Connection Logic)
+Maintains secure, environment-driven connections to the database using `dotenv` and `mongoose`.
+* **Zero-Hardcoding Configuration**: Uses `.env` files to store connection strings securely away from codebase logic.
+* **Graceful Exceptions**: Validates env presence at boot time and stops execution gracefully if database parameters are missing.
+* **Runtime Event Tracking**: Monitors the active MongoDB connection stream for unexpected run-time disconnects or critical socket errors.
 
-### 4. Syntactic & Semantic Validation Layers
-Before any payload is committed, the following strict checks are performed:
-* **Syntactic Validation**:
-  * Check that all critical fields (`id`, `name`, `role`) are present.
-  * Verify that `id` is strictly of type `number`.
-  * Verify that `name` and `role` are non-empty strings.
-* **Semantic Validation**:
-  * Checks if the user `id` already exists within the active memory list. If a duplicate is detected, registration is blocked.
+### 3. Pillar 3: The Action (RESTful API CRUD Layer)
+Implements clean REST endpoints that map standard HTTP protocol methods directly to corresponding Mongoose queries.
+* **POST `/api/users`**: Invokes `User.create` to store new user documents.
+* **GET `/api/users`**: Queries the database using `User.find({})` to fetch all user entries.
+* **PUT `/api/users/:id`**: Performs target updates using `User.findByIdAndUpdate` with validation checks configured to run upon edit (`runValidators: true`).
+* **DELETE `/api/users/:id`**: Deletes a specific document using `User.findByIdAndDelete`.
 
----
-
-## HTTP Status Codes Chart
-
-| Status Code | Type | Trigger Condition | Response Structure |
-| :--- | :--- | :--- | :--- |
-| **`200 OK`** | Success | GET request to `/users` retrieves list | JSON array of all registered user objects |
-| **`201 Created`** | Success | POST request to `/users` registers new user | JSON object with success message and new user details |
-| **`400 Bad Request`**| Client Error| Missing fields, invalid types, duplicate user IDs, or malformed JSON payloads | JSON object with descriptive error message |
-| **`500 Internal Server Error`** | Server Error | Unexpected system exception or route handler failure | `{"error": "Internal Server Error"}` |
+### 4. Pillar 4 (The Shield): NoSQL Injection Protection & Security
+Implements defense-in-depth measures against malicious inputs and invalid requests.
+* **Input Sanitization**: Destructures and validates incoming requests to strip out arbitrary MongoDB operators (e.g., query selectors like `$gt` or `$ne`).
+* **Pre-emptive ID Validation**: Validates the structure of the incoming hex string prior to query execution using `mongoose.Types.ObjectId.isValid(id)` to prevent CastError triggers and MongoDB driver crashes.
+* **Clean Error Propagation**: Standardizes MongoDB code violations (e.g., error `11000` duplicate key constraints, validation failures, schema cast errors) and transforms them into standard API-friendly messages.
 
 ---
 
-## Local Setup and Execution
+## 🔌 API Endpoints Mapping
+
+| Method | Endpoint | Description | Request Body Example | Success Status |
+| :--- | :--- | :--- | :--- | :---: |
+| **POST** | `/api/users` | Register a new user | `{"name": "John Doe", "email": "john@example.com", "age": 25}` | **`201 Created`** |
+| **GET** | `/api/users` | Fetch all registered users | *None* | **`200 OK`** |
+| **PUT** | `/api/users/:id` | Update an existing user | `{"name": "John Updated", "age": 26}` | **`200 OK`** |
+| **DELETE** | `/api/users/:id` | Remove a user by ID | *None* | **`200 OK`** |
+
+---
+
+## 🛠️ Installation & Setup Instructions
 
 ### Prerequisites
-- Node.js (v18 or higher recommended)
-- npm (Node Package Manager)
+* **Node.js** (v18 or higher recommended)
+* **MongoDB** (Running instance locally on port `27017` or a MongoDB Atlas URI)
 
 ### 1. Install Dependencies
-Initialize and install the required modules:
+Run the installation command in your terminal to setup package modules:
 ```bash
 npm install
 ```
 
-### 2. Start the Server
-Run the Express application on port 5000:
+### 2. Configure Environment Variables
+Copy the template `.env.example` file to `.env`:
+```bash
+cp .env.example .env
+```
+Open `.env` and specify your database port and target connection URI:
+```env
+PORT=5000
+MONGO_URI=mongodb://localhost:27017/decodelabs_db
+```
+
+### 3. Start the Web Server
+Launch the server in production mode:
 ```bash
 node server.js
 ```
-
-### 3. Send Test Requests
-
-#### Retrieve User List (GET)
-```bash
-curl -X GET http://localhost:5000/users
+The server will boot up and establish connection to your MongoDB instance:
+```stdout
+[INFO] Server is running on port 5000
+[INFO] Successfully connected to MongoDB database.
 ```
 
-#### Register User (POST)
+---
+
+## 🧪 Testing Guide
+
+This project includes a comprehensive suite of **10 Integration Tests** targeting database states and API endpoints. 
+
+### How to Run the Tests
+Ensure MongoDB is running locally (or via your configured connection string) and run:
 ```bash
-curl -X POST http://localhost:5000/users \
-  -H "Content-Type: application/json" \
-  -d '{"id": 101, "name": "Alice Smith", "role": "intern"}'
+npm test
 ```
+
+### Integration Test Scenarios Summary
+The test suite performs the following sequential actions:
+
+1. **Test 1: Create User (Success)** — Verifies a standard user object with correct values can be saved.
+2. **Test 2: Schema validation failure (Age < 18)** — Verifies database rejects registrations below age 18.
+3. **Test 3: Schema validation failure (Invalid Email)** — Confirms regex rejection of malformed emails.
+4. **Test 4: Unique Email Constraint** — Tests that duplicates of existing emails are rejected.
+5. **Test 5: Read all users** — Confirms retrieval of the stored database user list.
+6. **Test 6: Update User (Success)** — Verifies target field updates function correctly.
+7. **Test 7: Update User with Invalid Age Validation** — Confirms validation remains active during resource updates.
+8. **Test 8: Update User with Invalid ID format** — Confirms premature ID structure validation halts incorrect formats.
+9. **Test 9: Delete User (Success)** — Validates document cleanup and removal from database.
+10. **Test 10: Verify empty list** — Assures database queries return clean, empty states when collections are empty.

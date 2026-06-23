@@ -1,7 +1,12 @@
+require('dotenv').config();
 const express = require('express');
+const mongoose = require('mongoose');
+const logger = require('./utils/logger');
+const User = require('./models/User');
 
 const app = express();
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
+const MONGO_URI = process.env.MONGO_URI;
 
 // Enable parsing of JSON bodies for incoming requests.
 app.use(express.json());
@@ -9,103 +14,182 @@ app.use(express.json());
 // Catch syntax errors in parsed JSON requests to prevent server crashes.
 app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    logger.warn('Malformed JSON request received');
     return res.status(400).json({ error: 'Invalid JSON payload' });
   }
   next();
 });
 
-/**
- * In-memory data store for users.
- * Chosen over a full database to fulfill the rapid prototyping requirements of the task.
- * @type {Array<{id: number, name: string, role: string}>}
- */
-const users = [];
+// Establish connection to MongoDB.
+if (!MONGO_URI) {
+  logger.error('CRITICAL: MONGO_URI is not defined in the environment variables.');
+  process.exit(1);
+}
+
+mongoose.connect(MONGO_URI)
+  .then(() => {
+    logger.info('Successfully connected to MongoDB database.');
+  })
+  .catch((err) => {
+    logger.error('Failed to establish connection with MongoDB:', err);
+    process.exit(1);
+  });
+
+// Monitor database connection health status.
+mongoose.connection.on('error', (err) => {
+  logger.error('MongoDB connection runtime error occurred:', err);
+});
+mongoose.connection.on('disconnected', () => {
+  logger.warn('MongoDB connection disconnected.');
+});
 
 /**
- * Validates the syntax and semantics of user registration input.
- * Separated from the route handler to make validation testable and clean.
- * 
- * @param {any} body - The incoming request body.
- * @returns {{isValid: boolean, error?: string}} Validation result.
+ * Normalizes Mongoose and MongoDB exceptions into API-friendly client responses.
+ * Created to consolidate error parsing and ensure clean separation of error handling logic.
+ * @param {Error} error - The caught database or runtime error.
+ * @param {express.Response} res - Express response object.
+ * @returns {express.Response} The formatted error response.
  */
-function validateUserData(body) {
-  const { id, name, role } = body;
-
-  // Verify that all required fields are present in the request body.
-  if (id === undefined || name === undefined || role === undefined) {
-    return { isValid: false, error: 'Missing required fields: id, name, role' };
+function handleDatabaseError(error, res) {
+  // Catch Mongoose schema constraints violations (e.g. min age, email regex).
+  if (error.name === 'ValidationError') {
+    const messages = Object.values(error.errors).map(val => val.message);
+    logger.warn('Validation error during database query execution:', { messages });
+    return res.status(400).json({ error: messages.join(', ') });
   }
 
-  // Enforce strict type checking for the ID to prevent DB and logic errors.
-  if (typeof id !== 'number' || Number.isNaN(id)) {
-    return { isValid: false, error: 'Field "id" must be a valid number' };
+  // Catch MongoDB unique constraint violations (specifically for unique email index).
+  if (error.code === 11000) {
+    logger.warn('Duplicate key violation detected:', { keys: error.keyValue });
+    return res.status(400).json({ error: 'Email already exists' });
   }
 
-  // Ensure name is a non-empty string to maintain contact integrity.
-  if (typeof name !== 'string' || name.trim() === '') {
-    return { isValid: false, error: 'Field "name" must be a non-empty string' };
+  // Catch Mongoose type casting errors (typically caused by malformed ObjectId).
+  if (error.name === 'CastError') {
+    logger.warn(`Type casting failed for path ${error.path} with value ${error.value}`);
+    return res.status(400).json({ error: 'Invalid ID format' });
   }
 
-  // Limit roles to expected domain values to prevent unauthorized privileges.
-  if (typeof role !== 'string' || role.trim() === '') {
-    return { isValid: false, error: 'Field "role" must be a non-empty string' };
-  }
-
-  // Check for duplicate user IDs to enforce identity uniqueness.
-  const idExists = users.some(user => user.id === id);
-  if (idExists) {
-    return { isValid: false, error: `User with id ${id} already exists` };
-  }
-
-  return { isValid: true };
+  logger.error('Unhandled server exception encountered:', error);
+  return res.status(500).json({ error: 'Internal Server Error' });
 }
 
 /**
- * GET /users
- * Retrieves the full list of users registered in the system.
+ * POST /api/users
+ * Registers a new user. Performs strict validation based on User Mongoose Schema constraints.
  */
-app.get('/users', (req, res) => {
+app.post('/api/users', async (req, res) => {
   try {
-    res.status(200).json(users);
+    const { name, email, age } = req.body;
+
+    // Destructure properties to sanitize input and prevent arbitrary MongoDB operator injection.
+    const newUser = await User.create({
+      name: name?.trim(),
+      email: email?.trim(),
+      age
+    });
+
+    logger.info(`User registered successfully: ${newUser._id}`);
+    res.status(201).json({
+      message: 'User registered successfully',
+      user: newUser
+    });
   } catch (error) {
-    // Catch-all block for unexpected internal issues (e.g., serialization errors).
-    res.status(500).json({ error: 'Internal Server Error' });
+    handleDatabaseError(error, res);
   }
 });
 
 /**
- * POST /users
- * Handles new user registration with strict validation.
+ * GET /api/users
+ * Fetches all registered users from the database.
  */
-app.post('/users', (req, res) => {
+app.get('/api/users', async (req, res) => {
   try {
-    const validation = validateUserData(req.body);
-    if (!validation.isValid) {
-      return res.status(400).json({ error: validation.error });
+    const users = await User.find({});
+    res.status(200).json(users);
+  } catch (error) {
+    handleDatabaseError(error, res);
+  }
+});
+
+/**
+ * PUT /api/users/:id
+ * Updates an existing user by MongoDB ObjectId, validating fields with schema constraints.
+ */
+app.put('/api/users/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, email, age } = req.body;
+
+    // Validate ID format before database query to reject invalid IDs early and avoid Mongo CastError logs.
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      logger.warn(`Rejected update request due to malformed User ID format: ${id}`);
+      return res.status(400).json({ error: 'Invalid ID format' });
     }
 
-    const newUser = {
-      id: req.body.id,
-      name: req.body.name.trim(),
-      role: req.body.role.trim()
-    };
+    // Build sanitization payload to prevent injecting unvalidated fields or operator syntax.
+    const updatePayload = {};
+    if (name !== undefined) updatePayload.name = name.trim();
+    if (email !== undefined) updatePayload.email = email.trim();
+    if (age !== undefined) updatePayload.age = age;
 
-    users.push(newUser);
-    res.status(201).json({ message: 'User registered successfully', user: newUser });
+    const updatedUser = await User.findByIdAndUpdate(
+      id,
+      updatePayload,
+      { returnDocument: 'after', runValidators: true }
+    );
+
+    if (!updatedUser) {
+      logger.warn(`Update target user ID not found: ${id}`);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    logger.info(`User updated successfully: ${updatedUser._id}`);
+    res.status(200).json({
+      message: 'User updated successfully',
+      user: updatedUser
+    });
   } catch (error) {
-    // Safeguard against runtime failures during list insertion or response formatting.
-    res.status(500).json({ error: 'Internal Server Error' });
+    handleDatabaseError(error, res);
+  }
+});
+
+/**
+ * DELETE /api/users/:id
+ * Removes a user from the database by MongoDB ObjectId.
+ */
+app.delete('/api/users/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Validate ID format before executing query.
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      logger.warn(`Rejected delete request due to malformed User ID format: ${id}`);
+      return res.status(400).json({ error: 'Invalid ID format' });
+    }
+
+    const deletedUser = await User.findByIdAndDelete(id);
+
+    if (!deletedUser) {
+      logger.warn(`Delete target user ID not found: ${id}`);
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    logger.info(`User deleted successfully: ${deletedUser._id}`);
+    res.status(200).json({
+      message: 'User deleted successfully',
+      user: deletedUser
+    });
+  } catch (error) {
+    handleDatabaseError(error, res);
   }
 });
 
 // Start listening for incoming connections.
 app.listen(PORT, () => {
-  // Console logging is configured only for development tracking of startup status.
-  console.log(`Server is running on port ${PORT}`);
+  logger.info(`Server is running on port ${PORT}`);
 });
 
 module.exports = {
-  app,
-  users,
-  validateUserData
+  app
 };
